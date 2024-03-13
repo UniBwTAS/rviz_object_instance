@@ -1,0 +1,33 @@
+<package format="2">
+  <name>rviz_object_instance</name>
+  <version>0.1.0</version>
+  <description>
+    Visualizes a ObjectInstance3DArray message
+  </description>
+  <maintainer email="andreas.reich@unibw.de">Andreas Reich</maintainer>
+  <license>TODO</license>
+
+  <author>Andreas Reich</author>
+
+  <buildtool_depend>catkin</buildtool_depend>
+
+  <depend>qtbase5-dev</depend>
+  <depend>libqt5-core</depend>
+  <depend>libqt5-gui</depend>
+  <depend>libqt5-widgets</depend>
+  <depend>rviz</depend>
+  <depend>ogre_helpers</depend>
+  <depend>ogre_primitives</depend>
+  <depend>roscpp</depend>
+  <depend>std_msgs</depend>
+  <depend>geometry_msgs</depend>
+  <depend>sensor_msgs</depend>
+  <depend>message_generation</depend>
+  <depend>message_runtime</depend>
+  <depend>object_instance_msgs</depend>
+  <depend>cv_bridge</depend>
+
+  <export>
+      <rviz plugin="${prefix}/plugin_description.xml"/>
+  </export>
+</package>

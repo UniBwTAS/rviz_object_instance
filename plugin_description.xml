@@ -1,0 +1,18 @@
+<library path="lib/librviz_object_instance">
+    <class name="rviz/ObjectInstance3D"
+           type="rviz::ObjectInstance3DDisplay"
+           base_class_type="rviz::Display">
+        <description>
+            Displays bounding boxes and point clouds of "object_instance_msgs/ObjectInstance3DArray".
+        </description>
+        <message_type>object_instance_msgs/ObjectInstance3DArray</message_type>
+    </class>
+    <class name="rviz/ObjectInstance2D"
+           type="rviz::ObjectInstance2DDisplay"
+           base_class_type="rviz::Display">
+        <description>
+            Displays bounding boxes of "object_instance_msgs/ObjectInstance2DArray".
+        </description>
+        <message_type>object_instance_msgs/ObjectInstance2DArray</message_type>
+    </class>
+</library>

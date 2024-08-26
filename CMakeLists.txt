@@ -14,7 +14,9 @@ find_package(catkin REQUIRED COMPONENTS
     sensor_msgs
     message_generation
     object_instance_msgs
-    cv_bridge)
+    cv_bridge
+    image_geometry
+    image_transport)
 
 catkin_package(CATKIN_DEPENDS
     rviz
@@ -26,7 +28,9 @@ catkin_package(CATKIN_DEPENDS
     sensor_msgs
     message_runtime
     object_instance_msgs
-    cv_bridge)
+    cv_bridge
+    image_geometry
+    image_transport)
 
 include_directories(
     ${catkin_INCLUDE_DIRS}

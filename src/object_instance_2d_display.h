@@ -14,6 +14,7 @@
 
 #include <object_instance_msgs/ObjectInstance2DArray.h>
 #include <sensor_msgs/Image.h>
+#include <image_geometry/pinhole_camera_model.h>
 
 namespace Ogre
 {
@@ -77,6 +78,7 @@ class ObjectInstance2DDisplay : public ImageDisplayBase
 
     /* This is called by incomingMessage(). */
     void processMessage(const sensor_msgs::ImageConstPtr& msg) override;
+    void processCamInfoMessage(const sensor_msgs::CameraInfo::ConstPtr& msg);
 
     void processInstancesMessage(const object_instance_msgs::ObjectInstance2DArrayConstPtr& msg);
 
@@ -87,6 +89,10 @@ class ObjectInstance2DDisplay : public ImageDisplayBase
     enqueueMsg(const std::pair<sensor_msgs::ImageConstPtr, object_instance_msgs::ObjectInstance2DArrayConstPtr>& p);
     void checkForNewClasses();
     std::tuple<bool, QColor, ColorProperty*> addClassToList(uint16_t class_index, const std::string& class_name);
+
+    ros::Subscriber caminfo_sub_;
+    sensor_msgs::ImageConstPtr debayer(const sensor_msgs::Image::ConstPtr& raw_msg);
+    sensor_msgs::ImageConstPtr rectify(const sensor_msgs::ImageConstPtr& image_msg);
 
     Ogre::SceneManager* img_scene_manager_{};
 
@@ -113,6 +119,12 @@ class ObjectInstance2DDisplay : public ImageDisplayBase
     FloatProperty* img_min_property_;
     FloatProperty* img_max_property_;
     bool got_float_image_;
+
+    EnumProperty* debayer_property_;
+    EnumProperty* rectify_property_;
+    image_geometry::PinholeCameraModel model_;
+    sensor_msgs::CameraInfo::ConstPtr current_caminfo_;
+    boost::mutex caminfo_mutex_;
 
     IntProperty* img_median_buffer_size_property_;
     BoolProperty* bb_enable_property_;

@@ -22,6 +22,7 @@
 #include <sensor_msgs/image_encodings.h>
 
 #include <cv_bridge/cv_bridge.h>
+#include <image_transport/camera_common.h>
 
 #include <ogre_helpers/color_material_helper.h>
 
@@ -29,6 +30,22 @@
 
 namespace rviz
 {
+
+enum
+{
+    Debayer_Bilinear = 0,
+    Debayer_EdgeAware = 1,
+    Debayer_EdgeAwareWeighted = 2,
+    Debayer_VNG = 3,
+};
+
+enum
+{
+    Interpolation_NN = 0,
+    Interpolation_Linear = 1,
+    Interpolation_Cubic = 2,
+    Interpolation_Lanczos4 = 3,
+};
 
 ObjectInstance2DDisplay::ObjectInstance2DDisplay() : ImageDisplayBase(), texture_(), inst_messages_received_(0)
 {
@@ -76,6 +93,24 @@ ObjectInstance2DDisplay::ObjectInstance2DDisplay() : ImageDisplayBase(), texture
         new BoolProperty("Unreliable", false, "Prefer UDP topic transport", img_property_, SLOT(updateTopic()), this);
 
     // own properties
+
+    debayer_property_ =
+        new EnumProperty("Debayering Algorithm", "Bilinear", "Debayering algorithm.", this, SLOT(propertyChanged()), this);
+    debayer_property_->addOption("Bilinear", Debayer_Bilinear);
+    debayer_property_->addOption("EdgeAware", Debayer_EdgeAware);
+    debayer_property_->addOption("EdgeAwareWeighted", Debayer_EdgeAwareWeighted);
+    debayer_property_->addOption("VNG", Debayer_VNG);
+
+    rectify_property_ = new EnumProperty("Rectify Algorithm",
+                                         "Linear",
+                                         "Interpolation algorithm between source image pixels.",
+                                         this,
+                                         SLOT(propertyChanged()),
+                                         this);
+    rectify_property_->addOption("Nearest neighbor", Interpolation_NN);
+    rectify_property_->addOption("Linear", Interpolation_Linear);
+    rectify_property_->addOption("Cubic", Interpolation_Cubic);
+    rectify_property_->addOption("Lanczos4", Interpolation_Lanczos4);
 
     img_normalize_property_ =
         new BoolProperty("Normalize Range",
@@ -256,9 +291,11 @@ void ObjectInstance2DDisplay::onDisable()
 
 void ObjectInstance2DDisplay::subscribe()
 {
+    std::string target_frame = fixed_frame_.toStdString();
+    ImageDisplayBase::enableTFFilter(target_frame);
     ImageDisplayBase::subscribe();
 
-    if (!isEnabled())
+    if (!isEnabled() || topic_property_->getTopicStd().empty())
     {
         return;
     }
@@ -279,12 +316,26 @@ void ObjectInstance2DDisplay::subscribe()
             setStatus(StatusProperty::Error, "Instances Topic", QString("Error subscribing: ") + e.what());
         }
     }
+
+    try
+    {
+        const std::string caminfo_topic = image_transport::getCameraInfoTopic(topic_property_->getTopicStd());
+        caminfo_sub_ = update_nh_.subscribe(caminfo_topic, 1, &ObjectInstance2DDisplay::processCamInfoMessage, this);
+    }
+    catch (ros::Exception& e)
+    {
+        setStatus(StatusProperty::Error, "Camera Info", QString("Error subscribing: ") + e.what());
+    }
 }
 
 void ObjectInstance2DDisplay::unsubscribe()
 {
     ImageDisplayBase::unsubscribe();
     instances_sub_.reset();
+    caminfo_sub_.shutdown();
+
+    boost::mutex::scoped_lock lock(caminfo_mutex_);
+    current_caminfo_.reset();
 }
 
 void ObjectInstance2DDisplay::updateNormalizeOptions()
@@ -370,12 +421,37 @@ void ObjectInstance2DDisplay::reset()
         StatusLevel::Warn,
         "Sync",
         "Unable to synchronize image and instances. Are both messages published with exactly the same timestamp?");
+
+    // We explicitly do not reset current_caminfo_ here: If we are subscribed to a latched caminfo topic,
+    // we will not receive another message after reset, i.e. the caminfo could not be recovered.
+    // Thus, we reset caminfo only if unsubscribing.
+
+    const std::string topic = topic_property_->getTopicStd();
+    if (!topic.empty())
+    {
+        const std::string caminfo_topic = image_transport::getCameraInfoTopic(topic);
+        boost::mutex::scoped_lock lock(caminfo_mutex_);
+        if (!current_caminfo_)
+            setStatus(StatusProperty::Warn,
+                      "Camera Info",
+                      "No CameraInfo received on [" + QString::fromStdString(caminfo_topic) +
+                          "].\nTopic may not exist.");
+    }
 }
 
 /* This is called by incomingMessage(). */
 void ObjectInstance2DDisplay::processMessage(const sensor_msgs::ImageConstPtr& msg)
 {
-    enqueueMsg({msg, object_instance_msgs::ObjectInstance2DArrayConstPtr()});
+    sensor_msgs::ImageConstPtr msg_debayer = debayer(msg);
+    sensor_msgs::ImageConstPtr msg_rectify = rectify(msg_debayer);
+    enqueueMsg({msg_rectify, object_instance_msgs::ObjectInstance2DArrayConstPtr()});
+}
+
+void ObjectInstance2DDisplay::processCamInfoMessage(const sensor_msgs::CameraInfo::ConstPtr& msg)
+{
+    boost::mutex::scoped_lock lock(caminfo_mutex_);
+    current_caminfo_ = msg;
+    setStatus(StatusProperty::Ok, "Camera Info", "received");
 }
 
 void ObjectInstance2DDisplay::processInstancesMessage(const object_instance_msgs::ObjectInstance2DArrayConstPtr& msg)
@@ -745,6 +821,185 @@ std::tuple<bool, QColor, ColorProperty*> ObjectInstance2DDisplay::addClassToList
     }
     else
         return it->second;
+}
+
+sensor_msgs::ImageConstPtr ObjectInstance2DDisplay::debayer(const sensor_msgs::Image::ConstPtr& raw_msg)
+{
+    namespace enc = sensor_msgs::image_encodings;
+
+    int bit_depth = enc::bitDepth(raw_msg->encoding);
+    //@todo Fix as soon as bitDepth fixes it
+    if (raw_msg->encoding == enc::YUV422)
+        bit_depth = 8;
+
+    if (enc::isMono(raw_msg->encoding) || enc::isColor(raw_msg->encoding))
+    {
+        setStatus(StatusProperty::Ok, "Debayer", "OK");
+        return raw_msg;
+    }
+    else if (enc::isBayer(raw_msg->encoding))
+    {
+        int type = bit_depth == 8 ? CV_8U : CV_16U;
+        const cv::Mat bayer(raw_msg->height,
+                            raw_msg->width,
+                            CV_MAKETYPE(type, 1),
+                            const_cast<uint8_t*>(&raw_msg->data[0]),
+                            raw_msg->step);
+
+        sensor_msgs::ImagePtr color_msg = boost::make_shared<sensor_msgs::Image>();
+        color_msg->header = raw_msg->header;
+        color_msg->height = raw_msg->height;
+        color_msg->width = raw_msg->width;
+        color_msg->encoding = bit_depth == 8 ? enc::BGR8 : enc::BGR16;
+        color_msg->step = color_msg->width * 3 * (bit_depth / 8);
+        color_msg->data.resize(color_msg->height * color_msg->step);
+
+        cv::Mat color(color_msg->height, color_msg->width, CV_MAKETYPE(type, 3), &color_msg->data[0], color_msg->step);
+
+        int algorithm = debayer_property_->getOptionInt();
+        if (algorithm == Debayer_EdgeAware || algorithm == Debayer_EdgeAwareWeighted)
+        {
+            // These algorithms are not in OpenCV yet
+            if (raw_msg->encoding != enc::BAYER_GRBG8)
+            {
+                setStatus(StatusProperty::Warn,
+                          "Debayer",
+                          "Edge aware algorithms currently only support GRBG8 Bayer. "
+                          "Falling back to bilinear interpolation.");
+                algorithm = Debayer_Bilinear;
+            }
+            else
+            {
+                // if (algorithm == Debayer_EdgeAware) TODO: fix
+                //     image_proc::debayerEdgeAware(bayer, color);
+                // else
+                //     image_proc::debayerEdgeAwareWeighted(bayer, color);
+            }
+        }
+        if (algorithm == Debayer_Bilinear || algorithm == Debayer_VNG)
+        {
+            int code = -1;
+            if (raw_msg->encoding == enc::BAYER_RGGB8 || raw_msg->encoding == enc::BAYER_RGGB16)
+                code = cv::COLOR_BayerBG2BGR;
+            else if (raw_msg->encoding == enc::BAYER_BGGR8 || raw_msg->encoding == enc::BAYER_BGGR16)
+                code = cv::COLOR_BayerRG2BGR;
+            else if (raw_msg->encoding == enc::BAYER_GBRG8 || raw_msg->encoding == enc::BAYER_GBRG16)
+                code = cv::COLOR_BayerGR2BGR;
+            else if (raw_msg->encoding == enc::BAYER_GRBG8 || raw_msg->encoding == enc::BAYER_GRBG16)
+                code = cv::COLOR_BayerGB2BGR;
+
+            if (algorithm == Debayer_VNG)
+                code += cv::COLOR_BayerBG2BGR_VNG - cv::COLOR_BayerBG2BGR;
+
+            try
+            {
+                cv::cvtColor(bayer, color, code);
+            }
+            catch (cv::Exception& e)
+            {
+                setStatus(StatusProperty::Warn,
+                          "Debayer",
+                          QString("cvtColor error: '%1', bayer code: %2, width %3, height %4")
+                              .arg(e.what())
+                              .arg(code)
+                              .arg(bayer.cols)
+                              .arg(bayer.rows));
+                return raw_msg;
+            }
+        }
+
+        setStatus(StatusProperty::Ok, "Debayer", "OK");
+        return color_msg;
+    }
+    else if (raw_msg->encoding == enc::YUV422)
+    {
+        // Use cv_bridge to convert to BGR8
+        sensor_msgs::ImagePtr color_msg;
+        try
+        {
+            color_msg = cv_bridge::toCvCopy(raw_msg, enc::BGR8)->toImageMsg();
+        }
+        catch (cv_bridge::Exception& e)
+        {
+            setStatus(StatusProperty::Warn, "Debayer", QString("cv_bridge conversion error: '%1'").arg(e.what()));
+            return raw_msg;
+        }
+
+        setStatus(StatusProperty::Ok, "Debayer", "OK");
+        return color_msg;
+    }
+    else if (raw_msg->encoding == enc::TYPE_8UC3)
+    {
+        // 8UC3 does not specify a color encoding. Is it BGR, RGB, HSV, XYZ, LUV...?
+        setStatus(StatusProperty::Warn,
+                  "Debayer",
+                  QString("Raw image topic '%s' has ambiguous encoding '8UC3'. The "
+                          "source should set the encoding to 'bgr8' or 'rgb8'.") +
+                      topic_property_->getTopic());
+    }
+    else
+    {
+        setStatus(StatusProperty::Warn,
+                  "Debayer",
+                  QString("Raw image topic '%1' has unsupported encoding '%2'")
+                      .arg(QString::fromStdString(topic_property_->getTopicStd()))
+                      .arg(QString::fromStdString(raw_msg->encoding)));
+    }
+
+    return raw_msg;
+}
+
+sensor_msgs::ImageConstPtr ObjectInstance2DDisplay::rectify(const sensor_msgs::ImageConstPtr& image_msg)
+{
+    sensor_msgs::CameraInfo::ConstPtr info_msg;
+    {
+        boost::mutex::scoped_lock lock(caminfo_mutex_);
+        info_msg = current_caminfo_;
+    }
+
+    if (!info_msg || !image_msg)
+        return image_msg;
+
+    // Verify camera is actually calibrated
+    if (info_msg->K[0] == 0.0)
+    {
+        setStatus(StatusProperty::Warn,
+                  "Rectify",
+                  QString("Camera publishing '%s' is uncalibrated").arg(topic_property_->getTopicStd().c_str()));
+        return image_msg;
+    }
+
+    // If zero distortion, just pass the message along
+    bool zero_distortion = true;
+    for (size_t i = 0; i < info_msg->D.size(); ++i)
+    {
+        if (info_msg->D[i] != 0.0)
+        {
+            zero_distortion = false;
+            break;
+        }
+    }
+    // This will be true if D is empty/zero sized
+    if (zero_distortion)
+    {
+        setStatus(StatusProperty::Ok, "Rectify", "OK");
+        return image_msg;
+    }
+
+    // Update the camera model
+    model_.fromCameraInfo(info_msg);
+
+    // Create cv::Mat views onto both buffers
+    const cv::Mat image = cv_bridge::toCvShare(image_msg)->image;
+    cv::Mat rect;
+
+    // Rectify and publish
+    int interpolation = rectify_property_->getOptionInt();
+    model_.rectifyImage(image, rect, interpolation);
+
+    // Allocate new rectified image message
+    setStatus(StatusProperty::Ok, "Rectify", "OK");
+    return cv_bridge::CvImage(image_msg->header, image_msg->encoding, rect).toImageMsg();
 }
 
 } // namespace rviz

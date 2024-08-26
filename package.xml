@@ -26,6 +26,8 @@
   <depend>message_runtime</depend>
   <depend>object_instance_msgs</depend>
   <depend>cv_bridge</depend>
+  <depend>image_geometry</depend>
+  <depend>image_transport</depend>
 
   <export>
       <rviz plugin="${prefix}/plugin_description.xml"/>

@@ -45,6 +45,7 @@ enum
     Interpolation_Linear = 1,
     Interpolation_Cubic = 2,
     Interpolation_Lanczos4 = 3,
+    Interpolation_Off = 4,
 };
 
 ObjectInstance2DDisplay::ObjectInstance2DDisplay() : ImageDisplayBase(), texture_(), inst_messages_received_(0)
@@ -111,6 +112,7 @@ ObjectInstance2DDisplay::ObjectInstance2DDisplay() : ImageDisplayBase(), texture
     rectify_property_->addOption("Linear", Interpolation_Linear);
     rectify_property_->addOption("Cubic", Interpolation_Cubic);
     rectify_property_->addOption("Lanczos4", Interpolation_Lanczos4);
+    rectify_property_->addOption("Off", Interpolation_Off);
 
     img_normalize_property_ =
         new BoolProperty("Normalize Range",
@@ -957,7 +959,7 @@ sensor_msgs::ImageConstPtr ObjectInstance2DDisplay::rectify(const sensor_msgs::I
         info_msg = current_caminfo_;
     }
 
-    if (!info_msg || !image_msg)
+    if (!info_msg || !image_msg || rectify_property_->getOptionInt() == Interpolation_Off)
         return image_msg;
 
     // Verify camera is actually calibrated
